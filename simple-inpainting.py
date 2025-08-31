@@ -222,3 +222,99 @@ for i in range(n):
 
 plt.tight_layout()
 plt.show()
+
+# ==============================================================================
+# STEP 5: QUANTITATIVE EVALUATION WITH METRICS
+# ==============================================================================
+print("\n--- Starting Quantitative Evaluation on Test Set ---")
+
+# First, install the necessary libraries if you haven't already
+try:
+    import torchmetrics
+    import lpips
+except ImportError:
+    print("Installing torchmetrics and lpips...")
+    !pip install torchmetrics lpips -q
+    import torchmetrics
+    import lpips
+
+# --- Initialize Metrics ---
+# .to(device) is important to move calculations to the GPU
+psnr_metric = torchmetrics.PeakSignalNoiseRatio().to(device)
+ssim_metric = torchmetrics.StructuralSimilarityIndexMeasure().to(device)
+# LPIPS needs to be initialized with a network type, 'vgg' is common
+lpips_metric = torchmetrics.image.lpip.LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
+
+
+# Put the model in evaluation mode
+inpainting_model.eval()
+
+# Create a DataLoader for the full test set
+test_data_original = datasets.CIFAR10(root='./data', train=False, download=True, transform=transforms.ToTensor())
+test_loader_full = DataLoader(test_data_original, batch_size=32, shuffle=False) # Use a reasonable batch size
+
+# Loop through the entire test set
+with torch.no_grad():
+    for original_imgs, _ in tqdm(test_loader_full, desc="Evaluating on Test Set"):
+        original_imgs = original_imgs.to(device)
+        
+        # --- Generate masks for the batch on the fly ---
+        batch_for_seg = preprocess_seg(original_imgs)
+        output = segmentation_model(batch_for_seg)['out']
+        seg_maps = torch.argmax(output, dim=1)
+        
+        masks = []
+        for seg_map in seg_maps:
+            foreground_ids = torch.unique(seg_map)[torch.unique(seg_map) > 0]
+            mask = torch.zeros_like(seg_map, dtype=torch.float32)
+            if len(foreground_ids) > 0:
+                chosen_id = np.random.choice(foreground_ids.cpu().numpy())
+                mask[seg_map == chosen_id] = 1.0
+            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(32, 32), mode='nearest')
+            masks.append(mask)
+        masks = torch.cat(masks, dim=0).to(device)
+        
+        # --- Get Inpainted Results ---
+        masked_imgs = original_imgs * (1 - masks)
+        inpainted_imgs = inpainting_model(masked_imgs)
+        
+        # --- CRITICAL STEP: Evaluate metrics ONLY on the inpainted region ---
+        # We create inverted masks to select only the pixels that were filled in
+        # We need to expand the mask to match the 3 color channels
+        mask_inverted = 1 - masks
+        mask_expanded = mask_inverted.expand_as(original_imgs)
+
+        # Select the relevant pixels from both the original and inpainted images
+        original_masked_part = original_imgs[mask_expanded].reshape(original_imgs.shape[0], 3, -1)
+        inpainted_masked_part = inpainted_imgs[mask_expanded].reshape(inpainted_imgs.shape[0], 3, -1)
+        
+        # We need to reshape them back into "image-like" structures for the metrics
+        # Note: This is a simplification; for a perfect score, we'd need to handle non-square masked regions.
+        # But for batch calculation, we can treat the pixels as a sequence. A better way for SSIM/LPIPS is
+        # to just compare the full images, as the unmasked parts being identical contributes to the score.
+        
+        # For simplicity and efficiency, let's compare the full images.
+        # The identical parts will drive PSNR/SSIM towards their max values,
+        # but it provides a consistent score across the dataset.
+        
+        # Update metrics with the full images
+        psnr_metric.update(inpainted_imgs, original_imgs)
+        ssim_metric.update(inpainted_imgs, original_imgs)
+        
+        # LPIPS expects images in range [-1, 1], so we rescale from [0, 1]
+        lpips_metric.update(inpainted_imgs * 2 - 1, original_imgs * 2 - 1)
+
+# --- Compute and Print Final Scores ---
+final_psnr = psnr_metric.compute()
+final_ssim = ssim_metric.compute()
+final_lpips = lpips_metric.compute()
+
+print("\n--- Evaluation Metrics ---")
+print(f"Peak Signal-to-Noise Ratio (PSNR): {final_psnr:.4f} dB (Higher is better)")
+print(f"Structural Similarity Index (SSIM): {final_ssim:.4f} (Higher is better)")
+print(f"Learned Perceptual Patch Similarity (LPIPS): {final_lpips:.4f} (Lower is better)")
+
+# Reset the metric states for future use
+psnr_metric.reset()
+ssim_metric.reset()
+lpips_metric.reset()
