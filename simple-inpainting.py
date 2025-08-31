@@ -14,15 +14,30 @@ import os
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# --- Inpainting Model and Segmentation Model (Same as before) ---
+# --- Inpainting Model and Segmentation Model Definitions ---
 class InpaintingAutoencoder(nn.Module):
     def __init__(self):
         super(InpaintingAutoencoder, self).__init__()
-        self.encoder = nn.Sequential(nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(True), nn.MaxPool2d(2), nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(True), nn.MaxPool2d(2))
-        self.decoder = nn.Sequential(nn.ConvTranspose2d(64, 32, 2, stride=2), nn.ReLU(True), nn.ConvTranspose2d(32, 3, 2, stride=2), nn.Sigmoid())
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(True),
+            nn.MaxPool2d(2),
+        )
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 3, kernel_size=2, stride=2),
+            nn.Sigmoid(),
+        )
     def forward(self, x):
         return self.decoder(self.encoder(x))
 
+# Load the pre-trained segmentation model once
 weights = DeepLabV3_ResNet50_Weights.DEFAULT
 segmentation_model = deeplabv3_resnet50(weights=weights).to(device).eval()
 preprocess_seg = weights.transforms()
@@ -36,7 +51,11 @@ os.makedirs(MASK_DIR, exist_ok=True)
 
 # Use the original CIFAR-10 dataset for this step
 cifar10_for_masks = datasets.CIFAR10(root='./data', train=True, download=True, transform=transforms.ToTensor())
-mask_gen_loader = DataLoader(cifar10_for_masks, batch_size=64, shuffle=False)
+
+# ----- THE FIX IS HERE -----
+# The batch size is reduced to 16 to prevent CUDA Out of Memory errors
+# during the memory-intensive segmentation model inference.
+mask_gen_loader = DataLoader(cifar10_for_masks, batch_size=16, shuffle=False)
 
 # Loop through the dataset and generate a mask for each image
 with torch.no_grad():
@@ -84,19 +103,21 @@ class InpaintingDataset(Dataset):
         mask = torch.load(mask_path)
         
         # Add a channel dimension to the mask for broadcasting
+        # The final shape will be [1, 32, 32]
         return image, mask.unsqueeze(0)
 
 # ==============================================================================
 # STEP 3: TRAIN USING THE EFFICIENT CUSTOM DATASET
 # ==============================================================================
-# Load the original dataset again
+# Load the original dataset again to be used by our custom dataset class
 train_data_original = datasets.CIFAR10(root='./data', train=True, download=True, transform=transforms.ToTensor())
 
-# Create our custom dataset
+# Create our custom dataset which pairs images with their saved masks
 train_dataset = InpaintingDataset(cifar_dataset=train_data_original, mask_directory=MASK_DIR)
+# The training loader can use a larger batch size as it's very memory-efficient
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 
-# Initialize model and optimizer
+# Initialize model, loss function, and optimizer
 inpainting_model = InpaintingAutoencoder().to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(inpainting_model.parameters(), lr=1e-3)
@@ -113,6 +134,7 @@ for epoch in range(num_epochs):
         # Masking is now a simple, fast operation
         masked_imgs = original_imgs * (1 - masks)
 
+        # Forward pass, loss calculation, and optimization
         outputs = inpainting_model(masked_imgs)
         loss = criterion(outputs, original_imgs)
         
@@ -121,6 +143,7 @@ for epoch in range(num_epochs):
         optimizer.step()
         running_loss += loss.item()
         
+        # Update the progress bar with the current loss
         progress_bar.set_postfix({'loss': running_loss / (progress_bar.n + 1)})
 
 print("Finished Training")
