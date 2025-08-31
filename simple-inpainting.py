@@ -147,3 +147,78 @@ for epoch in range(num_epochs):
         progress_bar.set_postfix({'loss': running_loss / (progress_bar.n + 1)})
 
 print("Finished Training")
+
+# ==============================================================================
+# STEP 4: VISUALIZE THE RESULTS ON THE TEST SET
+# ==============================================================================
+print("\n--- Visualizing Results ---")
+
+# Put the model in evaluation mode
+inpainting_model.eval()
+
+# Load the test data
+test_data_original = datasets.CIFAR10(root='./data', train=False, download=True, transform=transforms.ToTensor())
+test_loader = DataLoader(test_data_original, batch_size=10, shuffle=True) # We only need a few images
+
+# Get a single batch of test images
+original_test_imgs, _ = next(iter(test_loader))
+original_test_imgs = original_test_imgs.to(device)
+
+# Generate masks for this test batch on the fly
+with torch.no_grad():
+    batch_for_seg = preprocess_seg(original_test_imgs)
+    output = segmentation_model(batch_for_seg)['out']
+    seg_maps = torch.argmax(output, dim=1)
+    
+    test_masks = []
+    for seg_map in seg_maps:
+        foreground_ids = torch.unique(seg_map)[torch.unique(seg_map) > 0]
+        mask = torch.zeros_like(seg_map, dtype=torch.float32)
+        if len(foreground_ids) > 0:
+            chosen_id = np.random.choice(foreground_ids.cpu().numpy())
+            mask[seg_map == chosen_id] = 1.0
+        mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(32, 32), mode='nearest')
+        test_masks.append(mask)
+    
+    test_masks = torch.cat(test_masks, dim=0).to(device)
+
+# Create masked images and get the model's predictions
+masked_test_imgs = original_test_imgs * (1 - test_masks)
+with torch.no_grad():
+    inpainted_imgs = inpainting_model(masked_test_imgs)
+
+# Move all tensors to the CPU for plotting
+original_test_imgs = original_test_imgs.cpu()
+test_masks = test_masks.cpu()
+masked_test_imgs = masked_test_imgs.cpu()
+inpainted_imgs = inpainted_imgs.cpu()
+
+# Plot the images
+n = 10  # Number of images to display
+plt.figure(figsize=(20, 8))
+
+for i in range(n):
+    # --- Helper function for plotting ---
+    def plot_image(position, img_tensor, title):
+        ax = plt.subplot(4, n, position)
+        # Permute from (C, H, W) to (H, W, C) for displaying
+        plt.imshow(img_tensor.permute(1, 2, 0))
+        ax.get_xaxis().set_visible(False)
+        ax.get_yaxis().set_visible(False)
+        if i == 0: # Only set title for the first column
+            ax.set_title(title, fontsize=14)
+
+    # Row 1: Original Image
+    plot_image(i + 1, original_test_imgs[i], "Original")
+    
+    # Row 2: Generated Mask
+    plot_image(i + 1 + n, test_masks[i], "Mask")
+    
+    # Row 3: Masked Input
+    plot_image(i + 1 + 2 * n, masked_test_imgs[i], "Masked Input")
+    
+    # Row 4: Inpainted Result
+    plot_image(i + 1 + 3 * n, inpainted_imgs[i], "Inpainted Result")
+
+plt.tight_layout()
+plt.show()
