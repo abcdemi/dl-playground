@@ -82,7 +82,7 @@ This process allows the decoder to make highly context-aware decisions at every 
 
 This project is designed to be run in a Google Colab environment with a GPU runtime.
 
-1.  **Open the Notebook:** Open the `inpainting_with_frm.ipynb` notebook in Google Colab.
+1.  **Open the Notebook:** Open the `u-net-refined.ipynb` notebook in Google Colab.
 2.  **Select GPU Runtime:** In the menu, go to `Runtime` -> `Change runtime type` and select `GPU` as the hardware accelerator.
 3.  **Run the Cell:** The entire code is in a single cell. Simply run this cell to execute the full pipeline.
 
