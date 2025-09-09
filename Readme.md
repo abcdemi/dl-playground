@@ -1,7 +1,3 @@
-Of course. This is the perfect way to conclude the project and showcase your excellent results. Here is the updated `README.md` file, completely revamped to include everything you asked for.
-
----
-
 # Advanced Image Inpainting with a Refined U-Net
 
 This repository contains a PyTorch implementation of an advanced image inpainting pipeline. The project trains and evaluates deep learning models to fill in missing parts of images from the CIFAR-10 dataset. The core of this experiment is a **U-Net architecture enhanced with specialized Feature Refinement Modules (FRMs)**, designed to produce sharper and more contextually aware results.
