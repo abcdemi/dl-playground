@@ -18,8 +18,8 @@ The entire process, from data preparation to model evaluation, is encapsulated i
   - [Quantitative Metrics](#quantitative-metrics)
   - [Results Comparison](#results-comparison)
 - [Model Architecture](#model-architecture)
-  - [The U-Net Framework](#the-u-net-framework)
-  - [The Feature Refinement Modules](#the-feature-refinement-modules)
+  - [Overall U-Net Architecture](#overall-u-net-architecture)
+  - [Inside a Decoder Block: The Feature Refinement Module](#inside-a-decoder-block-the-feature-refinement-module)
 - [The Experimental Pipeline](#the-experimental-pipeline)
 - [How to Run](#how-to-run)
 
@@ -89,18 +89,124 @@ The performance of both models was evaluated on the 10,000 images of the CIFAR-1
 
 ## Model Architecture
 
-### The U-Net Framework
+### Overall U-Net Architecture
 
-The model is built on a U-Net, a powerful encoder-decoder architecture with **skip connections** that prevent the loss of fine-grained details during reconstruction.
+The model is built on a U-Net, a powerful encoder-decoder architecture with **skip connections**. This scheme illustrates the complete data flow. `(C, H, W)` denotes Channels, Height, and Width.
 
-### The Feature Refinement Modules
+```
+                                     Input Image (3, 32, 32)
+                                             |
+                                             v
+                                 +-------------------------+
+      +------------------------->|   Encoder Block 1       |-------------------------->+
+      |                          |   (DoubleConv)          |                           |
+      |                          |   Output: (64, 32, 32)  |                           |
+      |                          +-------------------------+                           |
+      |                                      |                                         |
+      |                                      v (MaxPool)                               |
+      |                          +-------------------------+                           |
+      +------------------------->|   Encoder Block 2       |-------------------------->+
+      |                          |   (DoubleConv)          |                           |
+      |                          |   Output: (128, 16, 16) |                           |
+      |                          +-------------------------+                           |
+      |                                      |                                         |
+      |                                      v (MaxPool)                               |
+      |                          +-------------------------+                           |
+      +------------------------->|   Encoder Block 3       |-------------------------->+
+      |                          |   (DoubleConv)          |                           |
+      |                          |   Output: (256, 8, 8)   |                           |
+      |                          +-------------------------+                           |
+      |                                      |                                         |
+      |                                      v (MaxPool)                               |
+      |                          +-------------------------+                           |
+      |                          |   Bottleneck            |                           |
+      |                          |   (DoubleConv)          |                           |
+      |                          |   Output: (512, 4, 4)   |                           |
+      |                          +-------------------------+                           |
+      |                                                                                |
+      |                            (Skip Connections)                                  |
+      |                                                                                |
+      |                          +-------------------------+                           ^
+      |                          |   Decoder Block 1       |                           |
+      |                          |   (UpBlockWithFRM)      |<--------------------------+
+      |                          |   Output: (256, 8, 8)   |
+      |                          +-------------------------+                           |
+      |                                      ^ (Upsample)                              |
+      |                                      |                                         |
+      |                          +-------------------------+                           |
+      |                          |   Decoder Block 2       |                           |
+      |                          |   (UpBlockWithFRM)      |<--------------------------+
+      |                          |   Output: (128, 16, 16) |                           |
+      |                          +-------------------------+                           |
+      |                                      ^ (Upsample)                              |
+      |                                      |                                         |
+      |                          +-------------------------+                           |
+      |                          |   Decoder Block 3       |                           |
+      |                          |   (UpBlockWithFRM)      |<--------------------------+
+      |                          |   Output: (64, 32, 32)  |                           |
+      |                          +-------------------------+                           |
+      |                                      |                                         |
+      |                                      v                                         |
+      |                          +-------------------------+                           |
+      |                          |   Final Convolution     |                           |
+      |                          |   (1x1 Conv + Sigmoid)  |                           |
+      |                          +-------------------------+                           |
+      |                                      |                                         |
+      |                                      v                                         |
+      +--------------------------------> Output Image (3, 32, 32)
+```
 
-The key innovation is the integration of a **Feature Refinement Module (FRM)** into every stage of the U-Net's decoder. The FRM's purpose is to intelligently "heal" the feature maps during the upsampling process by using information from the unmasked regions to guide the reconstruction of the masked regions.
+-   **Encoder (Downsampling Path):** Extracts *what* is in the image (semantic content).
+-   **Decoder (Upsampling Path):** Recovers *where* things are (spatial location).
+-   **Skip Connections:** Pass high-resolution features from the encoder directly to the decoder, preventing the loss of fine-grained details and combating blurriness.
 
-  <!-- You would need to create and upload this diagram -->
+### Inside a Decoder Block: The Feature Refinement Module
 
-**1. Simple FRM:** Uses a small, local convolutional network to analyze the context immediately surrounding the hole.
-**2. ASPP-FRM:** Uses Atrous Spatial Pyramid Pooling (ASPP) to analyze the context at multiple scales simultaneously (local, medium, and global), leading to a more robust understanding of the scene.
+This is the key innovation, integrated into every decoder stage. The FRM's purpose is to intelligently "heal" the feature maps *after* the skip connection is merged.
+
+```
+   From Previous Decoder Stage             From Encoder (Skip Connection)
+   (e.g., shape: [512, 4, 4])              (e.g., shape: [256, 8, 8])
+              |                                       |
+              v                                       |
++---------------------------+                         |
+|   Step 1: Upsample        |                         |
+| (ConvTranspose2d)         |                         |
+| Output: [256, 8, 8]       |                         |
++---------------------------+                         |
+              |                                       |
+              +--------------------+------------------+
+                                   |
+                                   v
+                  +-----------------------------------+
+                  |   Step 2: Concatenate             |
+                  | Along Channel Dimension           |
+                  | Output: [512, 8, 8]               |
+                  +-----------------------------------+
+                                   |
+                                   |
+                                   v                      Input Mask
+                  +-----------------------------------+   (e.g., [1, 32, 32])
+                  |   Step 3: Feature Refinement      | <---------+
+                  |   (FRM or ASPP-FRM Module)        |
+                  |   *Heals the feature map*         |
+                  |   Output: [512, 8, 8]             |
+                  +-----------------------------------+
+                                   |
+                                   v
+                  +-----------------------------------+
+                  |   Step 4: Final Processing        |
+                  |   (DoubleConv)                    |
+                  |   Output: [256, 8, 8]             |
+                  +-----------------------------------+
+                                   |
+                                   v
+                       To Next Decoder Stage
+```
+
+The FRM analyzes the features in the unmasked regions and uses that context to generate new, consistent features for the masked regions. We tested two versions:
+1.  **Simple FRM:** Uses standard convolutions with a local receptive field.
+2.  **ASPP-FRM:** Uses Atrous Spatial Pyramid Pooling to analyze context at multiple scales simultaneously, leading to a more robust understanding of the scene.
 
 ## The Experimental Pipeline
 
